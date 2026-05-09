@@ -24,73 +24,59 @@ import {
 } from 'lucide-react';
 
 // --- Constants ---
-const GRID_SIZE = 20;
-const INITIAL_SPEED = 150;
-const MIN_SPEED = 60;
-const SPEED_INCREMENT = 2;
-const MAX_SPEED = 400;
-const MANUAL_SPEED_STEP = 15;
+const CANVAS_SIZE = 400;
+const INITIAL_SNAKE_LENGTH = 15;
+const BASE_SPEED = 2.5;
+const BOOST_SPEED = 5.0;
+const ROTATION_SPEED = 0.08;
+const SNAKE_RADIUS = 8;
+const SEGMENT_SPACING = 5; // Distance between segments
+const FOOD_RADIUS = 5;
+const INITIAL_POS = { x: 200, y: 200 };
 
 type Point = { x: number; y: number };
-type Direction = 'UP' | 'DOWN' | 'LEFT' | 'RIGHT';
-
-const OPPOSITE_DIRECTIONS: Record<Direction, Direction> = {
-  UP: 'DOWN',
-  DOWN: 'UP',
-  LEFT: 'RIGHT',
-  RIGHT: 'LEFT',
-};
-
-const INITIAL_SNAKE: Point[] = [
-  { x: 10, y: 10 },
-  { x: 10, y: 11 },
-  { x: 10, y: 12 },
-];
 
 export default function App() {
   // --- State ---
-  const [snake, setSnake] = useState<Point[]>(INITIAL_SNAKE);
-  const [food, setFood] = useState<Point>({ x: 5, y: 5 });
-  const [direction, setDirection] = useState<Direction>('UP');
-  const [nextDirection, setNextDirection] = useState<Direction>('UP');
+  const [snake, setSnake] = useState<Point[]>([]);
+  const [food, setFood] = useState<Point>({ x: 100, y: 100 });
+  const [angle, setAngle] = useState(-Math.PI / 2); // Start pointing UP
+  const [targetAngle, setTargetAngle] = useState(-Math.PI / 2);
+  const [isBoosting, setIsBoosting] = useState(false);
   const [isGameOver, setIsGameOver] = useState(false);
   const [isPaused, setIsPaused] = useState(false);
   const [isStarted, setIsStarted] = useState(false);
   const [score, setScore] = useState(0);
   const [highScore, setHighScore] = useState(0);
-  const [speed, setSpeed] = useState(INITIAL_SPEED);
   const [isFlashing, setIsFlashing] = useState(false);
 
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const gameLoopRef = useRef<number | null>(null);
-  const lastUpdateTimeRef = useRef<number>(0);
+  const keysRef = useRef<Set<string>>(new Set());
 
   // --- Helpers ---
-  const getRandomPoint = useCallback((): Point => {
-    return {
-      x: Math.floor(Math.random() * GRID_SIZE),
-      y: Math.floor(Math.random() * GRID_SIZE),
-    };
-  }, []);
+  const getRandomPoint = useCallback((): Point => ({
+    x: Math.random() * CANVAS_SIZE,
+    y: Math.random() * CANVAS_SIZE,
+  }), []);
 
-  const spawnFood = useCallback((currentSnake: Point[]) => {
-    let newFood = getRandomPoint();
-    // Ensure food doesn't spawn on snake
-    while (currentSnake.some(segment => segment.x === newFood.x && segment.y === newFood.y)) {
-      newFood = getRandomPoint();
-    }
-    setFood(newFood);
+  const spawnFood = useCallback(() => {
+    setFood(getRandomPoint());
   }, [getRandomPoint]);
 
   const resetGame = () => {
-    setSnake(INITIAL_SNAKE);
-    setDirection('UP');
-    setNextDirection('UP');
+    const initialSnake: Point[] = [];
+    for (let i = 0; i < INITIAL_SNAKE_LENGTH; i++) {
+       initialSnake.push({ x: INITIAL_POS.x, y: INITIAL_POS.y + i * SEGMENT_SPACING });
+    }
+    setSnake(initialSnake);
+    setAngle(-Math.PI / 2);
+    setTargetAngle(-Math.PI / 2);
     setScore(0);
     setIsGameOver(false);
     setIsPaused(false);
-    setSpeed(INITIAL_SPEED);
-    spawnFood(INITIAL_SNAKE);
+    setIsBoosting(false);
+    spawnFood();
   };
 
   const startGame = () => {
@@ -102,95 +88,121 @@ export default function App() {
   const moveSnake = useCallback(() => {
     if (isGameOver || isPaused || !isStarted) return;
 
+    // Handle Rotation
+    let rotation = 0;
+    if (keysRef.current.has('ArrowLeft') || keysRef.current.has('a')) rotation -= ROTATION_SPEED;
+    if (keysRef.current.has('ArrowRight') || keysRef.current.has('d')) rotation += ROTATION_SPEED;
+    
+    const newAngle = angle + rotation;
+    setAngle(newAngle);
+
+    const currentSpeed = isBoosting ? BOOST_SPEED : BASE_SPEED;
+
     setSnake((prevSnake) => {
+      if (prevSnake.length === 0) return prevSnake;
+
       const head = prevSnake[0];
-      const newHead = { ...head };
+      const newHead = {
+        x: head.x + Math.cos(newAngle) * currentSpeed,
+        y: head.y + Math.sin(newAngle) * currentSpeed,
+      };
 
-      // Update direction for this tick
-      setDirection(nextDirection);
+      // 1. Wrap-around 
+      if (newHead.x < 0) newHead.x = CANVAS_SIZE;
+      else if (newHead.x > CANVAS_SIZE) newHead.x = 0;
       
-      switch (nextDirection) {
-        case 'UP': newHead.y -= 1; break;
-        case 'DOWN': newHead.y += 1; break;
-        case 'LEFT': newHead.x -= 1; break;
-        case 'RIGHT': newHead.x += 1; break;
+      if (newHead.y < 0) newHead.y = CANVAS_SIZE;
+      else if (newHead.y > CANVAS_SIZE) newHead.y = 0;
+
+      // 2. Check Collisions: Self (Skip first few segments)
+      for (let i = 20; i < prevSnake.length; i++) {
+        const seg = prevSnake[i];
+        const dist = Math.hypot(newHead.x - seg.x, newHead.y - seg.y);
+        if (dist < SNAKE_RADIUS) {
+          setIsGameOver(true);
+          return prevSnake;
+        }
       }
 
-      // 1. Wrap-around logic
-      if (newHead.x < 0) newHead.x = GRID_SIZE - 1;
-      else if (newHead.x >= GRID_SIZE) newHead.x = 0;
-      
-      if (newHead.y < 0) newHead.y = GRID_SIZE - 1;
-      else if (newHead.y >= GRID_SIZE) newHead.y = 0;
+      // 3. Movement logic: Slither style
+      const newSnake = [newHead];
+      let lastPos = newHead;
 
-      // 2. Check Collisions: Self
-      if (prevSnake.some(segment => segment.x === newHead.x && segment.y === newHead.y)) {
-        setIsGameOver(true);
-        return prevSnake;
-      }
-
-      const newSnake = [newHead, ...prevSnake];
-
-      // 3. Check Food
-      if (newHead.x === food.x && newHead.y === food.y) {
-        setScore(s => s + 10);
-        setSpeed(prev => Math.max(MIN_SPEED, prev - SPEED_INCREMENT));
-        spawnFood(newSnake);
+      // Every segment follows the one in front of it at a fixed distance
+      for (let i = 0; i < prevSnake.length - 1; i++) {
+        const currentSeg = prevSnake[i];
+        const nextSeg = prevSnake[i + 1];
         
-        // Trigger flashing effect
+        // Calculate distance between current and next
+        const dx = nextSeg.x - lastPos.x;
+        const dy = nextSeg.y - lastPos.y;
+        
+        // Wrap-aware distance calculation for trailing
+        const dist = Math.hypot(dx, dy);
+        
+        if (dist > SEGMENT_SPACING) {
+          const ratio = SEGMENT_SPACING / dist;
+          const movedSeg = {
+            x: lastPos.x + dx * ratio,
+            y: lastPos.y + dy * ratio
+          };
+          newSnake.push(movedSeg);
+          lastPos = movedSeg;
+        } else {
+          newSnake.push(nextSeg);
+          lastPos = nextSeg;
+        }
+      }
+
+      // Check Food
+      const foodDist = Math.hypot(newHead.x - food.x, newHead.y - food.y);
+      if (foodDist < SNAKE_RADIUS + FOOD_RADIUS) {
+        setScore(s => s + 10);
+        spawnFood();
         setIsFlashing(true);
         setTimeout(() => setIsFlashing(false), 300);
-      } else {
-        newSnake.pop(); // Remove tail
+        
+        // Add multiple segments when eating
+        for(let i = 0; i < 5; i++) {
+           newSnake.push({ ...newSnake[newSnake.length - 1] });
+        }
       }
 
       return newSnake;
     });
-  }, [food, isGameOver, isPaused, isStarted, nextDirection, spawnFood]);
+  }, [angle, food, isGameOver, isPaused, isStarted, spawnFood, isBoosting]);
 
   // --- Input ---
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      let newDir: Direction | null = null;
-      switch (e.key) {
-        case 'ArrowUp': case 'w': case 'W': newDir = 'UP'; break;
-        case 'ArrowDown': case 's': case 'S': newDir = 'DOWN'; break;
-        case 'ArrowLeft': case 'a': case 'A': newDir = 'LEFT'; break;
-        case 'ArrowRight': case 'd': case 'D': newDir = 'RIGHT'; break;
-        case ' ': 
-          if (isStarted && !isGameOver) setIsPaused(p => !p);
-          if (isGameOver) resetGame();
-          if (!isStarted) startGame();
-          break;
-        case 'j': case 'J':
-          setSpeed(prev => Math.min(MAX_SPEED, prev + MANUAL_SPEED_STEP));
-          break;
-        case 'k': case 'K':
-          setSpeed(prev => Math.max(MIN_SPEED, prev - MANUAL_SPEED_STEP));
-          break;
+      keysRef.current.add(e.key.toLowerCase());
+      
+      if (e.key === ' ') {
+        if (isStarted && !isGameOver) setIsPaused(p => !p);
+        if (isGameOver) resetGame();
+        if (!isStarted) startGame();
       }
+      
+      if (e.key === 'Shift') setIsBoosting(true);
+    };
 
-      if (newDir && newDir !== OPPOSITE_DIRECTIONS[direction]) {
-        setNextDirection(newDir);
-      }
+    const handleKeyUp = (e: KeyboardEvent) => {
+      keysRef.current.delete(e.key.toLowerCase());
+      if (e.key === 'Shift') setIsBoosting(false);
     };
 
     window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [direction, isGameOver, isPaused, isStarted]);
-
-  // --- Audio Effects (Simulated with visual feedback for now) ---
+    window.addEventListener('keyup', handleKeyUp);
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown);
+      window.removeEventListener('keyup', handleKeyUp);
+    };
+  }, [isGameOver, isPaused, isStarted]);
 
   // --- Game Loop ---
   useEffect(() => {
-    const loop = (timestamp: number) => {
-      if (!lastUpdateTimeRef.current) lastUpdateTimeRef.current = timestamp;
-      const deltaTime = timestamp - lastUpdateTimeRef.current;
-
-      if (deltaTime > speed) {
-        moveSnake();
-        lastUpdateTimeRef.current = timestamp;
-      }
+    const loop = () => {
+      moveSnake();
       gameLoopRef.current = requestAnimationFrame(loop);
     };
 
@@ -201,7 +213,7 @@ export default function App() {
     return () => {
       if (gameLoopRef.current) cancelAnimationFrame(gameLoopRef.current);
     };
-  }, [isStarted, isGameOver, isPaused, speed, moveSnake]);
+  }, [isStarted, isGameOver, isPaused, moveSnake]);
 
   // --- Persistent High Score ---
   useEffect(() => {
@@ -223,96 +235,70 @@ export default function App() {
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
 
-    // Clear background
-    ctx.fillStyle = '#09090b'; // zinc-950
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
-
-    // Draw Grid (Enhanced Contrast)
-    ctx.strokeStyle = '#27272a'; // zinc-800
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    
+    // Draw Grid
+    ctx.strokeStyle = '#18181b';
     ctx.lineWidth = 0.5;
-    const cellSize = canvas.width / GRID_SIZE;
-
-    for (let i = 0; i <= GRID_SIZE; i++) {
-      // Every 5th line is more prominent
-      const isMajor = i % 5 === 0;
-      ctx.strokeStyle = isMajor ? '#3f3f46' : '#27272a'; // zinc-700 / zinc-800
-      ctx.lineWidth = isMajor ? 1 : 0.5;
-
+    const gridSize = 40;
+    for (let x = 0; x <= canvas.width; x += gridSize) {
       ctx.beginPath();
-      ctx.moveTo(i * cellSize, 0);
-      ctx.lineTo(i * cellSize, canvas.height);
+      ctx.moveTo(x, 0);
+      ctx.lineTo(x, canvas.height);
       ctx.stroke();
-
+    }
+    for (let y = 0; y <= canvas.height; y += gridSize) {
       ctx.beginPath();
-      ctx.moveTo(0, i * cellSize);
-      ctx.lineTo(canvas.width, i * cellSize);
+      ctx.moveTo(0, y);
+      ctx.lineTo(canvas.width, y);
       ctx.stroke();
     }
 
-    // Draw Snake
-    snake.forEach((segment, index) => {
-      const isHead = index === 0;
-      
-      // Glow effect for snake
-      ctx.shadowBlur = isHead ? 15 : 8;
-      ctx.shadowColor = isHead ? '#22d3ee' : '#0891b2'; // cyan-400 / cyan-600
-      
-      ctx.fillStyle = isHead ? '#22d3ee' : '#0891b2';
-      
-      // Rounded snake segments
-      const x = segment.x * cellSize + 2;
-      const y = segment.y * cellSize + 2;
-      const size = cellSize - 4;
-      const radius = isHead ? 6 : 4;
-      
-      ctx.beginPath();
-      ctx.roundRect(x, y, size, size, radius);
-      ctx.fill();
-      
-      // Eyes for the head
-      if (isHead) {
-        ctx.shadowBlur = 0;
-        ctx.fillStyle = '#000';
-        const eyeSize = 3;
-        const eyeOffset = size / 4;
-        
-        // Dynamic eyes based on direction
-        let eye1 = { x: x + eyeOffset, y: y + eyeOffset };
-        let eye2 = { x: x + size - eyeOffset - eyeSize, y: y + eyeOffset };
-        
-        if (direction === 'DOWN') {
-          eye1 = { x: x + eyeOffset, y: y + size - eyeOffset - eyeSize };
-          eye2 = { x: x + size - eyeOffset - eyeSize, y: y + size - eyeOffset - eyeSize };
-        } else if (direction === 'LEFT') {
-          eye1 = { x: x + eyeOffset, y: y + eyeOffset };
-          eye2 = { x: x + eyeOffset, y: y + size - eyeOffset - eyeSize };
-        } else if (direction === 'RIGHT') {
-          eye1 = { x: x + size - eyeOffset - eyeSize, y: y + eyeOffset };
-          eye2 = { x: x + size - eyeOffset - eyeSize, y: y + size - eyeOffset - eyeSize };
-        }
-        
-        ctx.fillRect(eye1.x, eye1.y, eyeSize, eyeSize);
-        ctx.fillRect(eye2.x, eye2.y, eyeSize, eyeSize);
-      }
-    });
-
     // Draw Food
-    ctx.shadowBlur = 20;
-    ctx.shadowColor = '#f43f5e'; // rose-500
+    ctx.shadowBlur = 15;
+    ctx.shadowColor = '#f43f5e';
     ctx.fillStyle = '#f43f5e';
-    
-    const fx = food.x * cellSize + cellSize / 2;
-    const fy = food.y * cellSize + cellSize / 2;
-    const fRadius = cellSize / 3;
-
     ctx.beginPath();
-    ctx.arc(fx, fy, fRadius, 0, Math.PI * 2);
+    ctx.arc(food.x, food.y, FOOD_RADIUS, 0, Math.PI * 2);
     ctx.fill();
 
-    // Reset shadow
-    ctx.shadowBlur = 0;
+    // Draw Snake
+    if (snake.length > 0) {
+      // Draw tail to head to layer correctly
+      for (let i = snake.length - 1; i >= 0; i--) {
+        const seg = snake[i];
+        const isHead = i === 0;
+        
+        ctx.shadowBlur = isHead ? 20 : 5;
+        ctx.shadowColor = isHead ? '#22d3ee' : '#0891b2';
+        ctx.fillStyle = isHead ? '#22d3ee' : '#0891b2';
+        
+        ctx.beginPath();
+        ctx.arc(seg.x, seg.y, isHead ? SNAKE_RADIUS : SNAKE_RADIUS * 0.8, 0, Math.PI * 2);
+        ctx.fill();
 
-  }, [snake, food, direction]);
+        if (isHead) {
+          // Eyes
+          ctx.shadowBlur = 0;
+          ctx.fillStyle = '#000';
+          const eyeOffset = 4;
+          const eyeX1 = seg.x + Math.cos(angle + 0.5) * eyeOffset;
+          const eyeY1 = seg.y + Math.sin(angle + 0.5) * eyeOffset;
+          const eyeX2 = seg.x + Math.cos(angle - 0.5) * eyeOffset;
+          const eyeY2 = seg.y + Math.sin(angle - 0.5) * eyeOffset;
+          
+          ctx.beginPath();
+          ctx.arc(eyeX1, eyeY1, 2, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.beginPath();
+          ctx.arc(eyeX2, eyeY2, 2, 0, Math.PI * 2);
+          ctx.fill();
+        }
+      }
+    }
+    
+    ctx.shadowBlur = 0;
+  }, [snake, food, angle]);
 
   return (
     <div className="min-h-screen flex flex-col items-center justify-center p-4 gap-6 font-sans select-none">
@@ -321,10 +307,10 @@ export default function App() {
       <div className="w-full max-w-md flex items-center justify-between">
         <div className="flex flex-col">
           <h1 className="text-3xl font-display font-bold text-cyan-400 tracking-tighter neon-glow flex items-center gap-2">
-            NEON SNAKE
+            SLITHER NEON
           </h1>
           <p className="text-[10px] font-mono text-zinc-500 uppercase tracking-widest mt-1">
-            V 1.0 // SYSTEM ACTIVE
+            FREE MOVEMENT // v2.0
           </p>
         </div>
         <div className="flex gap-4">
@@ -356,8 +342,8 @@ export default function App() {
         <div className={`relative border border-zinc-800 bg-zinc-950 rounded-xl overflow-hidden shadow-2xl transition-colors duration-300 ${isFlashing ? 'border-cyan-400 shadow-[0_0_30px_rgba(34,211,238,0.4)]' : ''}`}>
           <canvas 
             ref={canvasRef}
-            width={400}
-            height={400}
+            width={CANVAS_SIZE}
+            height={CANVAS_SIZE}
             className="block aspect-square max-w-[90vw] sm:max-w-none shadow-inner"
           />
 
@@ -381,8 +367,8 @@ export default function App() {
                     </div>
                   </div>
                   <div className="space-y-2">
-                    <h2 className="text-2xl font-display font-bold text-zinc-100 uppercase tracking-widest">Initialization</h2>
-                    <p className="text-sm text-zinc-500 max-w-[240px]">Navigate the grid. Consume energy modules. Loop through walls. Avoid self-collisions.</p>
+                    <h2 className="text-2xl font-display font-bold text-zinc-100 uppercase tracking-widest">Free Movement</h2>
+                    <p className="text-sm text-zinc-500 max-w-[240px]">Use A/D or Arrows to steer. Hold SHIFT to boost. Consume energy.</p>
                   </div>
                   <button 
                     onClick={startGame}
@@ -393,12 +379,9 @@ export default function App() {
                   </button>
                   <div className="flex flex-col items-center justify-center gap-4 text-[10px] font-mono text-zinc-500">
                     <div className="flex gap-6">
-                      <span className="flex items-center gap-1"><span className="p-1 border border-zinc-800 rounded bg-zinc-900">ARROWS</span> MOVE</span>
+                      <span className="flex items-center gap-1"><span className="p-1 border border-zinc-800 rounded bg-zinc-900">A/D</span> STEER</span>
+                      <span className="flex items-center gap-1"><span className="p-1 border border-zinc-800 rounded bg-zinc-900">SHIFT</span> BOOST</span>
                       <span className="flex items-center gap-1"><span className="p-1 border border-zinc-800 rounded bg-zinc-900">SPACE</span> PAUSE</span>
-                    </div>
-                    <div className="flex gap-6">
-                      <span className="flex items-center gap-1 text-cyan-500/60"><span className="p-1 border border-cyan-900/30 rounded bg-cyan-950/20">K</span> SPEED UP</span>
-                      <span className="flex items-center gap-1 text-rose-500/60"><span className="p-1 border border-rose-900/30 rounded bg-rose-950/20">J</span> SPEED DOWN</span>
                     </div>
                   </div>
                 </motion.div>
@@ -416,7 +399,7 @@ export default function App() {
                   animate={{ scale: 1, y: 0 }}
                   className="space-y-6"
                 >
-                  <h2 className="text-4xl font-display font-bold text-rose-400 uppercase tracking-tighter italic">GAME OVER</h2>
+                  <h2 className="text-4xl font-display font-bold text-rose-400 uppercase tracking-tighter italic">CRITICAL FAILURE</h2>
                   <div className="flex flex-col items-center justify-center py-4 border-y border-rose-500/20 gap-1 w-48 mx-auto">
                     <span className="text-[10px] font-mono text-rose-300/50 uppercase">Final Score</span>
                     <span className="text-4xl font-display font-bold text-white">{score}</span>
@@ -460,32 +443,10 @@ export default function App() {
         </div>
       </div>
 
-      {/* --- Controls --- */}
-      <div className="w-full max-w-sm flex items-center justify-between gap-8 sm:hidden">
-         {/* Mobile D-Pad */}
-         <div className="grid grid-cols-3 gap-2">
-            <div />
-            <ControlButton icon={<ChevronUp />} onClick={() => direction !== 'DOWN' && setNextDirection('UP')} />
-            <div />
-            <ControlButton icon={<ChevronLeft />} onClick={() => direction !== 'RIGHT' && setNextDirection('LEFT')} />
-            <ControlButton icon={<ChevronDown />} onClick={() => direction !== 'UP' && setNextDirection('DOWN')} />
-            <ControlButton icon={<ChevronRight />} onClick={() => direction !== 'LEFT' && setNextDirection('RIGHT')} />
-         </div>
-
-         <div className="flex flex-col gap-3">
-            <button 
-              onClick={() => isGameOver ? resetGame() : setIsPaused(!isPaused)}
-              className="p-4 rounded-xl border border-zinc-800 bg-zinc-900 text-zinc-400 hover:text-cyan-400 transition-colors"
-            >
-              {isGameOver ? <RotateCcw /> : isPaused ? <Play /> : <Pause />}
-            </button>
-         </div>
-      </div>
-
       <div className="hidden sm:flex items-center gap-12 text-zinc-600 font-mono text-[10px]">
         <div className="flex items-center gap-2">
           <Settings className="w-4 h-4" />
-          <span>SPEED: {Math.round((INITIAL_SPEED / speed) * 100)}%</span>
+          <span>BOOST: {isBoosting ? 'ENABLED' : 'OFF'}</span>
         </div>
         <div className="flex items-center gap-2">
           <Trophy className="w-4 h-4" />
@@ -496,14 +457,4 @@ export default function App() {
   );
 }
 
-function ControlButton({ icon, onClick }: { icon: ReactNode, onClick: () => void }) {
-  return (
-    <button 
-      onClick={onClick}
-      className="w-12 h-12 flex items-center justify-center rounded-xl bg-zinc-900 border border-zinc-800 text-zinc-400 active:bg-cyan-500 active:text-zinc-950 active:border-cyan-400 transition-all outline-none"
-    >
-      {icon}
-    </button>
-  );
-}
 
